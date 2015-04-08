@@ -641,8 +641,11 @@ namespace {
 
             void deliver_client(Proxy* p)
             {
-                new Subscription(p, this->client->fd, p->random_addr(),
-                                 std::move(buffer));
+                Server const* s = p->random_addr();
+                if (s == nullptr) {
+                    return this->client->close();
+                }
+                new Subscription(p, this->client->fd, s->addr, std::move(buffer));
                 LOG(DEBUG) << "Deliver " << client.id().str() << "'s FD "
                            << this->client->fd << " as subscription client";
                 this->client->fd = -1;

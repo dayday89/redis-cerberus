@@ -1,9 +1,12 @@
 #include <unistd.h>
+#include <algorithm>
 
 #include "slot_map.hpp"
+#include "server.hpp"
 #include "fdutil.hpp"
-#include "buffer.hpp"
+#include "proxy.hpp"
 #include "exceptions.hpp"
+#include "utils/random.hpp"
 #include "utils/logging.hpp"
 #include "utils/string.h"
 
@@ -47,6 +50,41 @@ namespace {
 
 }
 
+SlotMap::SlotMap()
+{
+    std::fill(this->begin(), this->end(), nullptr);
+}
+
+bool SlotMap::all_covered() const
+{
+    return std::none_of(this->begin(), this->end(), [](Server* s) { return s == nullptr; });
+}
+
+std::set<Server*> SlotMap::replace_map(std::map<slot, util::Address> map, Proxy* proxy)
+{
+    std::set<Server*> removed;
+    std::set<Server*> new_mapped;
+    slot last_slot = 0;
+    for (auto& item: map) {
+        for (; last_slot < item.first; ++last_slot) {
+            removed.insert(_servers[last_slot]);
+            this->_servers[last_slot] = Server::get_server(item.second, proxy);
+            new_mapped.insert(_servers[last_slot]);
+        }
+    }
+    std::set<Server*> r;
+    std::set_difference(
+        removed.begin(), removed.end(), new_mapped.begin(), new_mapped.end(),
+        std::inserter(r, r.end()));
+    r.erase(nullptr);
+    return std::move(r);
+}
+
+Server* SlotMap::random_addr() const
+{
+    return this->_servers[util::randint(0, CLUSTER_SLOT_COUNT)];
+}
+
 std::map<slot, util::Address> cerb::parse_slot_map(std::string const& nodes_info)
 {
     std::vector<std::string> lines(util::split_str(nodes_info, "\n", true));
@@ -69,7 +107,7 @@ std::map<slot, util::Address> cerb::parse_slot_map(std::string const& nodes_info
 
 void cerb::write_slot_map_cmd_to(int fd)
 {
-    if (-1 == write(fd, CLUSTER_NODES_CMD.c_str(), CLUSTER_NODES_CMD.size())) {
+    if (-1 == ::write(fd, CLUSTER_NODES_CMD.c_str(), CLUSTER_NODES_CMD.size())) {
         throw IOError("Fetch cluster nodes info", errno);
     }
 }

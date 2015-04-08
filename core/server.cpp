@@ -1,4 +1,5 @@
 #include <sys/epoll.h>
+#include <map>
 
 #include "command.hpp"
 #include "server.hpp"
@@ -10,21 +11,6 @@
 #include "utils/logging.hpp"
 
 using namespace cerb;
-
-Server::Server(std::string const& host, int port, Proxy* p)
-    : ProxyConnection(new_stream_socket())
-    , _proxy(p)
-{
-    set_nonblocking(fd);
-    connect_fd(host, port, this->fd);
-
-    struct epoll_event ev;
-    ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
-    ev.data.ptr = this;
-    if (epoll_ctl(_proxy->epfd, EPOLL_CTL_ADD, fd, &ev) == -1) {
-        throw SystemError("epoll_ctl+add", errno);
-    }
-}
 
 void Server::triggered(int events)
 {
@@ -44,15 +30,6 @@ void Server::triggered(int events)
     }
     if (events & EPOLLOUT) {
         this->_send_to();
-    }
-}
-
-void Server::event_handled(std::set<Connection*>&)
-{
-    if (this->closed()) {
-        LOG(ERROR) << "Server closed connection " << this->fd
-                   << ". Notify proxy to update slot map";
-        _proxy->server_closed();
     }
 }
 
@@ -159,4 +136,85 @@ std::vector<util::sref<Command>> Server::deliver_commands()
     _commands.insert(_commands.end(), _ready_commands.begin(),
                      _ready_commands.end());
     return std::move(_commands);
+}
+
+static thread_local std::map<util::Address, Server*> servers_map;
+static thread_local std::vector<Server*> servers_pool;
+
+static void remove_entry(Server* server)
+{
+    servers_map.erase(server->addr);
+}
+
+void Server::event_handled(std::set<Connection*>&)
+{
+    if (this->closed()) {
+        LOG(ERROR) << "Server closed connection " << this->fd
+                   << ". Notify proxy to update slot map";
+        _proxy->server_closed();
+    }
+}
+
+std::map<util::Address, Server*>::iterator Server::addr_begin()
+{
+    return servers_map.begin();
+}
+
+std::map<util::Address, Server*>::iterator Server::addr_end()
+{
+    return servers_map.end();
+}
+
+void Server::_reconnect(util::Address const& addr, Proxy* p)
+{
+    this->fd = new_stream_socket();
+    this->_proxy = p;
+    this->addr = addr;
+
+    set_nonblocking(this->fd);
+    LOG(DEBUG) << "Connecting to " << addr.host << ':' << addr.port << " for " << fd << " from " << this;
+    connect_fd(addr.host, addr.port, this->fd);
+
+    struct epoll_event ev;
+    ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+    ev.data.ptr = this;
+    if (epoll_ctl(_proxy->epfd, EPOLL_CTL_ADD, fd, &ev) == -1) {
+        throw SystemError("epoll_ctl+add", errno);
+    }
+}
+
+Server* Server::_alloc_server(util::Address const& addr, Proxy* p)
+{
+    if (servers_pool.empty()) {
+        for (int i = 0; i < 8; ++i) {
+            servers_pool.push_back(new Server);
+            LOG(DEBUG) << "Allocate Server to " << &servers_pool << " : " << servers_pool.back();
+        }
+    }
+    Server* s = servers_pool.back();
+    s->_reconnect(addr, p);
+    servers_pool.pop_back();
+    return s;
+}
+
+Server* Server::get_server(util::Address addr, Proxy* p)
+{
+    auto i = servers_map.find(addr);
+    if (i == servers_map.end()) {
+        Server* s = Server::_alloc_server(addr, p);
+        servers_map.insert(std::make_pair(std::move(addr), s));
+        return s;
+    }
+    return i->second;
+}
+
+void Server::close_server(Server* server)
+{
+    LOG(DEBUG) << "Close Server " << server << " (" << server->fd << ')';
+    server->close();
+    server->_buffer.clear();
+    server->_commands.clear();
+    server->_ready_commands.clear();
+    ::remove_entry(server);
+    servers_pool.push_back(server);
 }

@@ -107,10 +107,6 @@ void SlotsMapUpdater::on_error()
 
 Proxy::Proxy(util::Address const& remote)
     : _clients_count(0)
-    , _server_map([this](std::string const& host, int port)
-                  {
-                      return new Server(host, port, this);
-                  })
     , _active_slot_updaters_count(0)
     , _total_cmd_elapse(0)
     , _total_cmd(0)
@@ -159,15 +155,12 @@ void Proxy::_update_slot_map()
 
 void Proxy::_set_slot_map(std::map<slot, util::Address> map)
 {
-    auto s(_server_map.set_map(std::move(map)));
-    std::for_each(s.begin(), s.end(),
-                  [&](Server* s)
-                  {
-                      std::vector<util::sref<Command>> c(s->deliver_commands());
-                      _retrying_commands.insert(_retrying_commands.end(),
-                                                c.begin(), c.end());
-                      delete s;
-                  });
+    for (Server* s: _server_map.replace_map(std::move(map), this)) {
+        LOG(DEBUG) << "Replaced server " << s;
+        std::vector<util::sref<Command>> c(s->deliver_commands());
+        this->_retrying_commands.insert(_retrying_commands.end(), c.begin(), c.end());
+        Server::close_server(s);
+    }
 
     if (!_server_map.all_covered()) {
         LOG(ERROR) << "Map not covered all slots";
@@ -209,13 +202,15 @@ void Proxy::_set_slot_map(std::map<slot, util::Address> map)
 
 void Proxy::_retrieve_slot_map()
 {
-    _server_map.iterate_addr(
-        [&](util::Address const& addr)
+    std::for_each(
+        Server::addr_begin(), Server::addr_end(),
+        [this](std::pair<util::Address, Server*> const& addr_server)
         {
+            util::Address const& addr = addr_server.first;
             try {
-                _slot_updaters.push_back(
+                this->_slot_updaters.push_back(
                     util::mkptr(new SlotsMapUpdater(addr, this)));
-                ++_active_slot_updaters_count;
+                ++this->_active_slot_updaters_count;
             } catch (ConnectionRefused& e) {
                 LOG(INFO) << e.what();
                 LOG(INFO) << "Disconnected: " << addr.host << ':' << addr.port;
@@ -316,7 +311,7 @@ void Proxy::_loop()
 Server* Proxy::get_server_by_slot(slot key_slot)
 {
     Server* s = _server_map.get_by_slot(key_slot);
-    return (s == nullptr || s->fd == -1) ? nullptr : s;
+    return (s == nullptr || s->closed()) ? nullptr : s;
 }
 
 void Proxy::accept_from(int listen_fd)

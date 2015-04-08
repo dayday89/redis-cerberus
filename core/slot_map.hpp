@@ -3,109 +3,51 @@
 
 #include <map>
 #include <set>
-#include <algorithm>
-#include <functional>
 
 #include "common.hpp"
 #include "utils/address.hpp"
-#include "utils/random.hpp"
 
 namespace cerb {
 
     int const CLUSTER_SLOT_COUNT = 16384;
 
-    template <typename Type>
-    class SlotMap {
-        std::map<slot, util::Address> _slot_range_to_addr;
-        std::map<util::Address, Type*> _addr_to_val;
-        std::function<Type*(std::string const&, int)> _val_factory;
-    public:
-        explicit SlotMap(std::function<Type*(std::string const&, int)> vf)
-            : _val_factory(std::move(vf))
-        {}
+    class Server;
+    class Proxy;
 
+    class SlotMap {
+        Server* _servers[CLUSTER_SLOT_COUNT];
+    public:
+        SlotMap();
         SlotMap(SlotMap const&) = delete;
 
-        bool all_covered() const
+        Server** begin()
         {
-            return _slot_range_to_addr.find(CLUSTER_SLOT_COUNT) !=
-                _slot_range_to_addr.end();
+            return _servers;
         }
 
-        template <typename F>
-        void iterate_addr(F f) const
+        Server** end()
         {
-            std::for_each(_addr_to_val.begin(), _addr_to_val.end(),
-                          [&](std::pair<util::Address, Type*> const& item)
-                          {
-                              f(item.first);
-                          });
+            return _servers + CLUSTER_SLOT_COUNT;
         }
 
-        util::Address const& random_addr() const
+        Server* const* begin() const
         {
-            while (true) {
-                int s = util::randint(0, CLUSTER_SLOT_COUNT);
-                auto slot_it = _slot_range_to_addr.upper_bound(s);
-                if (slot_it != _slot_range_to_addr.end()) {
-                    return slot_it->second;
-                }
-            }
+            return _servers;
         }
 
-        Type* get_by_slot(slot s)
+        Server* const* end() const
         {
-            auto slot_it = _slot_range_to_addr.upper_bound(s);
-            if (slot_it == _slot_range_to_addr.end()) {
-                return nullptr;
-            }
-            auto val_it = _addr_to_val.find(slot_it->second);
-            if (val_it == _addr_to_val.end()) {
-                return _addr_to_val[slot_it->second] = _val_factory(
-                    slot_it->second.host, slot_it->second.port);
-            }
-            return val_it->second;
+            return _servers + CLUSTER_SLOT_COUNT;
         }
 
-        std::set<Type*> set_map(std::map<slot, util::Address> map)
+        Server* get_by_slot(slot s)
         {
-            std::set<Type*> removed_vals;
-            std::map<util::Address, Type*> addr_to_val;
-            std::for_each(map.begin(), map.end(),
-                          [&](std::pair<slot, util::Address> const& item)
-                          {
-                              auto val_it = _addr_to_val.find(item.second);
-                              if (val_it == _addr_to_val.end()) {
-                                  return;
-                              }
-                              addr_to_val[item.second] = val_it->second;
-                              _addr_to_val.erase(val_it);
-                          });
-            std::for_each(_addr_to_val.begin(), _addr_to_val.end(),
-                          [&](std::pair<util::Address, Type*> const& item)
-                          {
-                              removed_vals.insert(item.second);
-                          });
-            _addr_to_val = std::move(addr_to_val);
-            _slot_range_to_addr = std::move(map);
-            return std::move(removed_vals);
+            return _servers[s];
         }
 
-        void erase_val(Type* val)
-        {
-            for (auto i = _addr_to_val.begin(); i != _addr_to_val.end();) {
-                if (i->second == val) {
-                    i = _addr_to_val.erase(i);
-                } else {
-                    ++i;
-                }
-            }
-        }
-
-        int addrs_count() const
-        {
-            return _addr_to_val.size();
-        }
+        bool all_covered() const;
+        std::set<Server*> replace_map(std::map<slot, util::Address> map, Proxy* proxy);
+        Server* random_addr() const;
     };
 
     std::map<slot, util::Address> parse_slot_map(std::string const& nodes_info);
