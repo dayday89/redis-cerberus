@@ -811,24 +811,6 @@ namespace {
             }},
     });
 
-    /*
-    std::set<std::string> UNSUPPORTED_RSP({
-        "KEYS", "MIGRATE", "MOVE", "OBJECT", "RANDOMKEY",
-        "RENAMENX", "SCAN", "BITOP",
-        "BLPOP", "BRPOP", "BRPOPLPUSH", "RPOPLPUSH",
-        "SINTERSTORE", "SDIFFSTORE", "SINTER", "SMOVE", "SUNIONSTORE",
-        "ZINTERSTORE", "ZUNIONSTORE",
-        "PFADD", "PFCOUNT", "PFMERGE",
-        "PUBSUB", "PUNSUBSCRIBE", "UNSUBSCRIBE",
-        "EVAL", "EVALSHA", "SCRIPT",
-        "WATCH", "UNWATCH", "EXEC", "DISCARD", "MULTI",
-        "SELECT", "QUIT", "ECHO", "AUTH",
-        "CLUSTER", "BGREWRITEAOF", "BGSAVE", "CLIENT", "COMMAND", "CONFIG",
-        "DBSIZE", "DEBUG", "FLUSHALL", "FLUSHDB", "INFO", "LASTSAVE", "MONITOR",
-        "ROLE", "SAVE", "SHUTDOWN", "SLAVEOF", "SLOWLOG", "SYNC", "TIME",
-    });
-    */
-
     std::set<std::string> STD_COMMANDS({
         "DUMP", "EXISTS", "EXPIRE", "EXPIREAT", "TTL", "PEXPIRE", "PEXPIREAT",
         "PTTL", "PERSIST", "RESTORE", "TYPE",
