@@ -11,9 +11,20 @@ using namespace cerb;
 
 FDWrapper::~FDWrapper()
 {
-    if (fd != -1) {
+    this->close();
+}
+
+bool FDWrapper::closed() const
+{
+    return this->fd == -1;
+}
+
+void FDWrapper::close()
+{
+    if (!this->closed()) {
         LOG(DEBUG) << "*close " << fd;
-        close(fd);
+        ::close(this->fd);
+        this->fd = -1;
     }
 }
 

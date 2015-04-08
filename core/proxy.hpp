@@ -6,41 +6,12 @@
 #include "utils/pointer.h"
 #include "command.hpp"
 #include "slot_map.hpp"
-#include "fdutil.hpp"
+#include "connection.hpp"
 
 namespace cerb {
 
     class Proxy;
-
-    class Connection
-        : public FDWrapper
-    {
-    public:
-        explicit Connection(int fd)
-            : FDWrapper(fd)
-        {}
-
-        virtual ~Connection() {}
-
-        virtual void triggered(int events) = 0;
-        virtual void event_handled(std::set<Connection*>&) {}
-        virtual void close() = 0;
-    };
-
-    class ProxyConnection
-        : public Connection
-    {
-    protected:
-        bool _closed;
-    public:
-        explicit ProxyConnection(int fd)
-            : Connection(fd)
-            , _closed(false)
-        {}
-
-        void event_handled(std::set<Connection*>&);
-        void close();
-    };
+    class Server;
 
     class Acceptor
         : public Connection
@@ -53,62 +24,7 @@ namespace cerb {
         {}
 
         void triggered(int events);
-        void close();
-    };
-
-    class Server
-        : public ProxyConnection
-    {
-        Proxy* const _proxy;
-        Buffer _buffer;
-
-        std::vector<util::sref<Command>> _commands;
-        std::vector<util::sref<Command>> _ready_commands;
-
-        void _send_to();
-        void _recv_from();
-    public:
-        Server(std::string const& host, int port, Proxy* p);
-
-        void triggered(int events);
-        void event_handled(std::set<Connection*>&);
-
-        void push_client_command(util::sref<Command> cmd);
-        void pop_client(Client* cli);
-        std::vector<util::sref<Command>> deliver_commands();
-    };
-
-    class Client
-        : public ProxyConnection
-    {
-        void _write_response();
-        void _read_request();
-
-        Proxy* const _proxy;
-        std::set<Server*> _peers;
-        std::vector<util::sptr<CommandGroup>> _parsed_groups;
-        std::vector<util::sptr<CommandGroup>> _awaiting_groups;
-        std::vector<util::sptr<CommandGroup>> _ready_groups;
-        int _awaiting_count;
-        Buffer _buffer;
-
-        void _process();
-        void _response_ready();
-    public:
-        Client(int fd, Proxy* p)
-            : ProxyConnection(fd)
-            , _proxy(p)
-            , _awaiting_count(0)
-        {}
-
-        ~Client();
-
-        void triggered(int events);
-        void group_responsed();
-        void add_peer(Server* svr);
-        void reactivate(util::sref<Command> cmd);
-        void push_command(util::sptr<CommandGroup> g);
-        void stat_proccessed(Interval cmd_elapse);
+        void on_error();
     };
 
     class SlotsMapUpdater
@@ -125,7 +41,7 @@ namespace cerb {
         SlotsMapUpdater(util::Address const& addr, Proxy* p);
 
         void triggered(int events);
-        void close();
+        void on_error();
 
         bool success() const
         {

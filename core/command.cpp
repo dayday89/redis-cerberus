@@ -5,6 +5,8 @@
 #include "command.hpp"
 #include "exceptions.hpp"
 #include "proxy.hpp"
+#include "client.hpp"
+#include "server.hpp"
 #include "subscription.hpp"
 #include "stats.hpp"
 #include "slot_calc.hpp"

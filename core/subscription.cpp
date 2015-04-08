@@ -1,4 +1,3 @@
-#include <unistd.h>
 #include <sys/epoll.h>
 
 #include "subscription.hpp"
@@ -32,24 +31,24 @@ Subscription::Subscription(Proxy* p, int clientfd, util::Address const& addr,
 void Subscription::triggered(int events)
 {
     if (events & EPOLLRDHUP) {
-        return this->close();
+        return this->on_error();
     }
     if (events & EPOLLIN) {
         Buffer b;
         if (b.read(fd) == 0) {
             LOG(DEBUG) << "Client quit because read 0 bytes";
-            return this->close();
+            return this->on_error();
         }
     }
     if (events & EPOLLOUT) {
         LOG(DEBUG) << "UNEXPECTED";
-        this->close();
+        this->on_error();
     }
 }
 
 void Subscription::event_handled(std::set<Connection*>& active_conns)
 {
-    if (this->_closed) {
+    if (this->closed()) {
         active_conns.erase(&_server);
         delete this;
     }
@@ -68,25 +67,25 @@ Subscription::ServerConn::ServerConn(util::Address const& addr,
 void Subscription::ServerConn::triggered(int events)
 {
     if (events & EPOLLRDHUP) {
-        return this->close();
+        return this->on_error();
     }
     if (events & EPOLLIN) {
         Buffer b;
         if (b.read(this->fd) == 0) {
             LOG(ERROR) << "Server closed subscription connection " << this->fd;
-            return this->close();
+            return this->on_error();
         }
         b.write(this->_peer->fd);
     }
     if (events & EPOLLOUT) {
         LOG(DEBUG) << "UNEXPECTED";
-        this->close();
+        this->on_error();
     }
 }
 
 void Subscription::ServerConn::event_handled(std::set<Connection*>& active_conns)
 {
-    if (this->_closed) {
+    if (this->closed()) {
         active_conns.erase(_peer);
         delete _peer;
     }

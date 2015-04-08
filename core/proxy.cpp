@@ -1,203 +1,28 @@
 #include <unistd.h>
 #include <netdb.h>
 #include <sys/epoll.h>
-#include <algorithm>
 
 #include "proxy.hpp"
+#include "server.hpp"
+#include "client.hpp"
 #include "response.hpp"
 #include "exceptions.hpp"
 #include "utils/string.h"
+#include "utils/alg.hpp"
 #include "utils/logging.hpp"
 
 using namespace cerb;
 
 static int const MAX_EVENTS = 1024;
 
-void ProxyConnection::event_handled(std::set<Connection*>&)
-{
-    if (this->_closed) {
-        delete this;
-    }
-}
-
-void ProxyConnection::close()
-{
-    this->_closed = true;
-}
-
 void Acceptor::triggered(int)
 {
     _proxy->accept_from(this->fd);
 }
 
-void Acceptor::close()
+void Acceptor::on_error()
 {
     LOG(ERROR) << "Accept error.";
-}
-
-Server::Server(std::string const& host, int port, Proxy* p)
-    : ProxyConnection(new_stream_socket())
-    , _proxy(p)
-{
-    set_nonblocking(fd);
-    connect_fd(host, port, this->fd);
-
-    struct epoll_event ev;
-    ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
-    ev.data.ptr = this;
-    if (epoll_ctl(_proxy->epfd, EPOLL_CTL_ADD, fd, &ev) == -1) {
-        throw SystemError("epoll_ctl+add", errno);
-    }
-}
-
-void Server::triggered(int events)
-{
-    if (events & EPOLLRDHUP) {
-        return this->close();
-    }
-    if (events & EPOLLIN) {
-        try {
-            this->_recv_from();
-        } catch (BadRedisMessage& e) {
-            LOG(FATAL) << "Receive bad message from server " << this->fd
-                       << " because: " << e.what()
-                       << " dump buffer (before close): "
-                       << this->_buffer.to_string();
-            exit(1);
-        }
-    }
-    if (events & EPOLLOUT) {
-        this->_send_to();
-    }
-}
-
-void Server::event_handled(std::set<Connection*>&)
-{
-    if (this->_closed) {
-        LOG(ERROR) << "Server closed connection " << this->fd
-                   << ". Notify proxy to update slot map";
-        ::close(this->fd);
-        this->fd = -1;
-        _proxy->server_closed();
-    }
-}
-
-void Server::_send_to()
-{
-    if (this->_commands.empty()) {
-        return;
-    }
-    if (!this->_ready_commands.empty()) {
-        LOG(DEBUG) << "+busy";
-        return;
-    }
-
-    std::vector<util::sref<Buffer>> buffer_arr;
-    this->_ready_commands = std::move(this->_commands);
-    buffer_arr.reserve(this->_ready_commands.size());
-    for (auto const& c: this->_ready_commands) {
-        buffer_arr.push_back(util::mkref(c->buffer));
-    }
-    Buffer::writev(this->fd, buffer_arr);
-
-    struct epoll_event ev;
-    ev.events = EPOLLIN | EPOLLET;
-    ev.data.ptr = this;
-    if (epoll_ctl(_proxy->epfd, EPOLL_CTL_MOD, this->fd, &ev) == -1) {
-        throw SystemError("epoll_ctl+modi", errno);
-    }
-}
-
-void Server::_recv_from()
-{
-    int n = this->_buffer.read(this->fd);
-    if (n == 0) {
-        LOG(INFO) << "Server hang up: " << this->fd;
-        throw ConnectionHungUp();
-    }
-    LOG(DEBUG) << "+read from " << this->fd
-               << " buffer size " << this->_buffer.size()
-               << ": " << this->_buffer.to_string();
-    auto responses(split_server_response(this->_buffer));
-    if (responses.size() > this->_ready_commands.size()) {
-        LOG(ERROR) << "+Error on split, expected size: " << this->_ready_commands.size()
-                   << " actual: " << responses.size() << " dump buffer:";
-        std::for_each(responses.begin(), responses.end(),
-                      [](util::sptr<Response> const& rsp)
-                      {
-                          LOG(ERROR) << "::: " << rsp->dump_buffer().to_string();
-                      });
-        LOG(ERROR) << "Rest buffer: " << this->_buffer.to_string();
-        LOG(FATAL) << "Exit";
-        exit(1);
-    }
-    LOG(DEBUG) << "+responses size: " << responses.size();
-    LOG(DEBUG) << "+rest buffer: " << this->_buffer.size() << ": " << this->_buffer.to_string();
-    auto client_it = this->_ready_commands.begin();
-    std::for_each(responses.begin(), responses.end(),
-                  [&](util::sptr<Response>& rsp)
-                  {
-                      util::sref<Command> c = *client_it++;
-                      if (c.not_nul()) {
-                          rsp->rsp_to(c, util::mkref(*this->_proxy));
-                      }
-                  });
-    this->_ready_commands.erase(this->_ready_commands.begin(), client_it);
-    struct epoll_event ev;
-    ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
-    ev.data.ptr = this;
-    if (epoll_ctl(_proxy->epfd, EPOLL_CTL_MOD, this->fd, &ev) == -1) {
-        throw SystemError("epoll_ctl+modio Server::_recv_from", errno);
-    }
-}
-
-void Server::push_client_command(util::sref<Command> cmd)
-{
-    _commands.push_back(cmd);
-    cmd->group->client->add_peer(this);
-}
-
-template <typename F>
-static void _erase_command_if(std::vector<util::sref<Command>>& what, F f)
-{
-    what.erase(
-        std::remove_if(
-            what.begin(), what.end(),
-            [&](util::sref<Command> cmd)
-            {
-                return f(cmd);
-            }),
-        what.end());
-}
-
-void Server::pop_client(Client* cli)
-{
-    _erase_command_if(
-        this->_commands,
-        [&](util::sref<Command> cmd)
-        {
-            return cmd->group->client.is(cli);
-        });
-    std::for_each(this->_ready_commands.begin(), this->_ready_commands.end(),
-                  [&](util::sref<Command>& cmd)
-                  {
-                      if (cmd.not_nul() && cmd->group->client.is(cli)) {
-                          cmd.reset();
-                      }
-                  });
-}
-
-std::vector<util::sref<Command>> Server::deliver_commands()
-{
-    _erase_command_if(
-        this->_ready_commands,
-        [](util::sref<Command> cmd)
-        {
-            return cmd.nul();
-        });
-    _commands.insert(_commands.end(), _ready_commands.begin(),
-                     _ready_commands.end());
-    return std::move(_commands);
 }
 
 SlotsMapUpdater::SlotsMapUpdater(util::Address const& addr, Proxy* p)
@@ -274,167 +99,10 @@ void SlotsMapUpdater::triggered(int events)
     }
 }
 
-void SlotsMapUpdater::close()
+void SlotsMapUpdater::on_error()
 {
     epoll_ctl(_proxy->epfd, EPOLL_CTL_DEL, this->fd, NULL);
     _proxy->notify_slot_map_updated();
-}
-
-Client::~Client()
-{
-    std::for_each(this->_peers.begin(), this->_peers.end(),
-                  [&](Server* svr)
-                  {
-                      svr->pop_client(this);
-                  });
-    _proxy->pop_client(this);
-}
-
-void Client::triggered(int events)
-{
-    if (events & EPOLLRDHUP) {
-        return this->close();
-    }
-    try {
-        if (events & EPOLLIN) {
-            this->_read_request();
-        }
-        if (events & EPOLLOUT) {
-            this->_write_response();
-        }
-    } catch (BadRedisMessage& e) {
-        LOG(ERROR) << "Receive bad message from client " << this->fd
-                   << " because: " << e.what()
-                   << " dump buffer (before close): "
-                   << this->_buffer.to_string();
-        return this->close();
-    }
-}
-
-void Client::_write_response()
-{
-    if (this->_awaiting_groups.empty() || _awaiting_count != 0) {
-        return;
-    }
-    if (!this->_ready_groups.empty()) {
-        LOG(DEBUG) << "-busy";
-        return;
-    }
-
-    std::vector<util::sref<Buffer>> buffer_arr;
-    this->_ready_groups = std::move(this->_awaiting_groups);
-    for (auto const& g: this->_ready_groups) {
-        g->append_buffer_to(buffer_arr);
-    }
-    Buffer::writev(this->fd, buffer_arr);
-    this->_ready_groups.clear();
-    this->_peers.clear();
-
-    struct epoll_event ev;
-    ev.events = EPOLLIN | EPOLLET;
-    ev.data.ptr = this;
-    if (epoll_ctl(_proxy->epfd, EPOLL_CTL_MOD, this->fd, &ev) == -1) {
-        throw SystemError("epoll_ctl-modi", errno);
-    }
-
-    if (!this->_parsed_groups.empty()) {
-        _process();
-    }
-}
-
-void Client::_read_request()
-{
-    int n = this->_buffer.read(this->fd);
-    LOG(DEBUG) << "-read from " << this->fd << " current buffer size: " << this->_buffer.size() << " read returns " << n;
-    if (n == 0) {
-        return this->close();
-    }
-
-    split_client_command(this->_buffer, util::mkref(*this));
-
-    if (_awaiting_groups.empty() && _ready_groups.empty()) {
-        _process();
-    }
-}
-
-void Client::reactivate(util::sref<Command> cmd)
-{
-    Server* s = cmd->select_server(this->_proxy);
-    if (s == nullptr) {
-        return;
-    }
-    LOG(DEBUG) << "reactivated " << s->fd;
-    struct epoll_event ev;
-    ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
-    ev.data.ptr = s;
-    if (epoll_ctl(this->_proxy->epfd, EPOLL_CTL_MOD, s->fd, &ev) == -1) {
-        throw SystemError("epoll_ctl+modio Client::reactivate", errno);
-    }
-}
-
-void Client::_process()
-{
-    for (auto& g: this->_parsed_groups) {
-        if (g->long_connection()) {
-            epoll_ctl(this->_proxy->epfd, EPOLL_CTL_DEL, this->fd, nullptr);
-            g->deliver_client(this->_proxy);
-            LOG(DEBUG) << "Convert self to long connection, delete " << this;
-            return this->close();
-        }
-
-        if (g->wait_remote()) {
-            ++_awaiting_count;
-            g->select_remote(this->_proxy);
-        }
-        _awaiting_groups.push_back(std::move(g));
-    }
-    this->_parsed_groups.clear();
-
-    if (0 < _awaiting_count) {
-        struct epoll_event ev;
-        ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
-        for (Server* svr: this->_peers) {
-            ev.data.ptr = svr;
-            if (epoll_ctl(this->_proxy->epfd, EPOLL_CTL_MOD, svr->fd, &ev) == -1) {
-                throw SystemError("epoll_ctl+modio Client::_process", errno);
-            }
-        }
-    } else {
-        _response_ready();
-    }
-    LOG(DEBUG) << "Processed, rest buffer " << this->_buffer.size();
-}
-
-void Client::_response_ready()
-{
-    struct epoll_event ev;
-    ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
-    ev.data.ptr = this;
-    if (epoll_ctl(_proxy->epfd, EPOLL_CTL_MOD, this->fd, &ev) == -1) {
-        throw SystemError("epoll_ctl-modio", errno);
-    }
-}
-
-void Client::group_responsed()
-{
-    if (--_awaiting_count == 0) {
-        _response_ready();
-    }
-}
-
-void Client::add_peer(Server* svr)
-{
-    this->_peers.insert(svr);
-}
-
-void Client::stat_proccessed(Interval cmd_elapse)
-{
-    _proxy->stat_proccessed(cmd_elapse);
-}
-
-void Client::push_command(util::sptr<CommandGroup> g)
-{
-    this->_parsed_groups.push_back(std::move(g));
 }
 
 Proxy::Proxy(util::Address const& remote)
@@ -458,7 +126,7 @@ Proxy::Proxy(util::Address const& remote)
 
 Proxy::~Proxy()
 {
-    close(epfd);
+    ::close(epfd);
 }
 
 void Proxy::_update_slot_map()
@@ -628,7 +296,7 @@ void Proxy::_loop()
         } catch (IOErrorBase& e) {
             LOG(ERROR) << "IOError: " << e.what() << " :: "
                        << "Close connection to " << conn->fd << " in " << conn;
-            conn->close();
+            conn->on_error();
             closed_conns.insert(conn);
         }
     }
@@ -682,7 +350,7 @@ void Proxy::accept_from(int listen_fd)
 
 void Proxy::pop_client(Client* cli)
 {
-    _erase_command_if(
+    util::erase_if(
         this->_retrying_commands,
         [&](util::sref<Command> cmd)
         {
